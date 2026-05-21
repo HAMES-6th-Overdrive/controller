@@ -11,10 +11,21 @@ import time
 # ==========================================
 
 ZCU_IP = "192.168.10.2"
+
+# 송신 포트
 ZCU_PORT = 30500
 
+# 수신 포트
+RPI_IP   = "192.168.10.1"
+RPI_PORT = 30500
+
+# TX
 SERVICE_ID = 0x0001
 METHOD_ID  = 0x1001
+
+# RX (Vehicle Speed)
+SERVICE_ID_SPEED = 0x0002
+METHOD_ID_SPEED  = 0x2003
 
 CLIENT_ID = 0x0001
 
@@ -39,10 +50,26 @@ GEAR_D = 1
 gear_state = GEAR_P
 
 # ==========================================
+# Vehicle Speed 변수
+# ==========================================
+
+vehicle_speed = 0
+
+# ==========================================
 # UDP 소켓 생성
 # ==========================================
 
+# 송신 소켓
 sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+
+# 수신 소켓
+rx_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+
+rx_sock.bind((RPI_IP, RPI_PORT))
+
+rx_sock.setblocking(False)
+
+print(f"SOME/IP Listening : {RPI_PORT}")
 
 # ==========================================
 # pygame 초기화
@@ -100,11 +127,8 @@ def build_someip(service_id,
                  payload):
 
     message_id = (service_id << 16) | method_id
-    request_id = (client_id << 16) | session_id
 
-    # Request ID 4Byte
-    # PV/IV/Type/RC 4Byte
-    # + payload
+    request_id = (client_id << 16) | session_id
 
     length = 8 + len(payload)
 
@@ -122,6 +146,90 @@ def build_someip(service_id,
     return header + payload
 
 # ==========================================
+# SOME/IP 파싱
+# ==========================================
+
+def parse_someip(data):
+
+    if len(data) < 16:
+        return None
+
+    (
+        message_id,
+        length,
+        request_id,
+        pv,
+        iv,
+        msg_type,
+        ret_code
+    ) = struct.unpack(
+        "!IIIBBBB",
+        data[:16]
+    )
+
+    service_id = (message_id >> 16) & 0xFFFF
+
+    method_id = message_id & 0xFFFF
+
+    payload = data[16:]
+
+    return {
+        "service_id": service_id,
+        "method_id": method_id,
+        "payload": payload
+    }
+
+# ==========================================
+# 차량 속도 SOME/IP 수신
+#
+# Payload:
+# [LOW][HIGH]
+# ==========================================
+
+def read_vehicle_speed():
+
+    global vehicle_speed
+
+    try:
+
+        data, addr = rx_sock.recvfrom(1024)
+
+        parsed = parse_someip(data)
+
+        if parsed is None:
+            return
+
+        if parsed["service_id"] != SERVICE_ID_SPEED:
+            return
+
+        if parsed["method_id"] != METHOD_ID_SPEED:
+            return
+
+        payload = parsed["payload"]
+
+        if len(payload) < 2:
+            return
+
+        low  = payload[0]
+
+        high = payload[1]
+
+        vehicle_speed = low | (high << 8)
+
+        print(
+            f"[RX SOME/IP] Vehicle Speed : "
+            f"{vehicle_speed}"
+        )
+
+    except BlockingIOError:
+
+        pass
+
+    except Exception as rx_error:
+
+        print("RX Error :", rx_error)
+
+# ==========================================
 # 메인 루프
 # ==========================================
 
@@ -130,6 +238,12 @@ while True:
     try:
 
         pygame.event.pump()
+
+        # ==============================
+        # 차량 속도 수신
+        # ==============================
+
+        read_vehicle_speed()
 
         # ==============================
         # Axis 읽기
@@ -196,6 +310,7 @@ while True:
         # ==============================
 
         print(f"Speed Axis : {axis_speed:.3f} -> {speed_byte}")
+
         print(f"Steer Axis : {axis_steer:.3f} -> {steer_byte}")
 
         print(
@@ -203,7 +318,13 @@ while True:
             f"{'P' if gear_state == GEAR_P else 'D'}"
         )
 
+        print(
+            f"Vehicle Speed : "
+            f"{vehicle_speed}"
+        )
+
         print("Payload :", payload.hex().upper())
+
         print("Packet  :", packet.hex().upper())
 
         print("--------------------------------")
